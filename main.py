@@ -24,155 +24,10 @@ from utils.args import ArgsInit
 from utils.ckpt_util import save_ckpt
 
 from model.model2 import DeeperGCN
-from model.model_transformer import Transformer
+# from model.model_transformer import Transformer
 from model.model_concatenation import PLANet
 
 from data.dataset import load_dataset, reload_dataset, get_perturbed_dataset
-
-
-def robust_augment(model, batch, threshold, device, args):
-    """
-    Compute augmented molecules based on Rogot Goldberg Similarity between original molecule and augmented molecule.
-    Args:
-        model:
-        batch:
-        threshold:
-        device:
-        args:
-    Returns:
-        perturbed_batch:
-    """
-    print("Computing augmented molecules...")
-
-    def Similarity(fps):
-        # first generate the distance matrix:
-        dists = []
-        fps_all = copy.deepcopy(fps)
-        fps_all.pop(0)
-        sims = DataStructs.BulkRogotGoldbergSimilarity(fps[0], fps[0:2])
-        dists.extend([1 - x for x in sims])
-        return dists
-
-    cls_criterion = torch.nn.BCELoss()
-
-    # Begin augmentations
-    perturbed_mols = []
-    perturbed_labels = []
-    perturbed_smiles = []
-    orig_labels = []
-
-    if args.feature == "full":
-        pass
-    elif args.feature == "simple":
-        # only retain the top two node/edge features
-        num_features = args.num_features
-        batch.x = batch.x[:, :num_features]
-        batch.edge_attr = batch.edge_attr[:, :num_features]
-    if batch.x.shape[0] == 1 or batch.batch[-1] == 0:
-        pass
-    else:
-        model.eval()
-        pred = model(batch, dropout=False)
-        is_labeled = batch.y == batch.y
-        labels = torch.unsqueeze(batch.y, 1)
-
-        with torch.enable_grad():
-            loss = 0
-            #breakpoint()
-            class_loss = cls_criterion(
-                F.sigmoid(pred[:, 1]).to(torch.float32),
-                #F.sigmoid(pred).to(torch.float32),
-                batch.y.to(torch.float32)
-            )
-            loss += class_loss
-        loss.backward()
-
-        batch_mol_id = 0
-        smiles_used = []
-        for mol, smiles in tqdm(zip(batch.mol, batch.smiles), total=len(batch.smiles)):
-            if smiles in smiles_used:
-                breakpoint()
-
-            scaffold = MurckoScaffold.GetScaffoldForMol(mol)
-            fp_original = AllChem.GetMorganFingerprintAsBitVect(scaffold, 2, 1024)
-
-            find_edge = True
-            iteration = 0
-            mol_dict = args.edge_dict[smiles].copy()
-
-            num_edges = len(mol_dict.keys())
-
-            while find_edge and iteration < num_edges:
-                del_edge = min(mol_dict.keys(), key=lambda k: mol_dict[k].grad)
-                grad = mol_dict[del_edge].grad.detach()
-
-                if grad >= 0:
-                    break
-
-                atom_1, atom_2 = del_edge
-
-                deg_atom_1 = mol.GetAtomWithIdx(atom_1).GetDegree()
-                deg_atom_2 = mol.GetAtomWithIdx(atom_2).GetDegree()
-                emol = copy.deepcopy(mol)
-                emol = Chem.EditableMol(emol)
-                emol.RemoveBond(atom_1, atom_2)
-                if deg_atom_1 == 1:
-                    emol.RemoveAtom(atom_1)
-                if deg_atom_2 == 1:
-                    emol.RemoveAtom(atom_2)
-
-                perturbed_mol = emol.GetMol()
-
-                Chem.rdmolops.FastFindRings(perturbed_mol)
-                fp_perturbed = AllChem.GetMorganFingerprintAsBitVect(
-                    perturbed_mol, 2, 1024
-                )
-                fps = [fp_original, fp_perturbed, fp_perturbed]
-                _, similarity = Similarity(fps)
-
-                if int(labels[batch_mol_id]) == 0:
-                    statement = similarity > threshold[1]
-                else:
-                    statement = similarity < threshold[1]
-
-                if statement:
-                    find_edge = False
-                    perturbed_mols.append(perturbed_mol)
-                    perturbed_labels.append(labels[batch_mol_id].tolist()[0])
-                    perturbed_smiles.append(smiles + "-p")
-                    break
-                else:
-                    del mol_dict[del_edge]
-                    iteration += 1
-            batch_mol_id += 1
-            #            del args.edge_dict[smiles]
-            smiles_used.append(smiles)
-        orig_labels += batch.y.tolist()
-    with open(os.path.join(args.save, "adversaries.pickle"), "wb") as file:
-        pickle.dump(perturbed_mols, file)
-    print("Saved adversaries to" + os.path.join(args.save, "adversaries.pickle"))
-
-    all_labels = orig_labels + perturbed_labels
-
-    weights_train = make_weights_for_balanced_classes(all_labels, args.nclasses)
-    weights_train = torch.DoubleTensor(weights_train)
-    new_sampler_train = torch.utils.data.sampler.WeightedRandomSampler(
-        weights_train, len(weights_train)
-    )
-
-    total_mols = copy.deepcopy(batch.mol) + perturbed_mols
-    perturbed_set = get_perturbed_dataset(total_mols, all_labels, args)
-    new_train_loader = DataLoader(
-        perturbed_set,
-        batch_size=len(perturbed_set),
-        sampler=new_sampler_train,
-        num_workers=args.num_workers,
-    )
-    for perturbed_batch in new_train_loader:  # only runs once
-        perturbed_batch = perturbed_batch.to(device)
-
-    print("Done.")
-    return perturbed_batch
 
 
 def train(
@@ -201,8 +56,6 @@ def train(
         else:
             batch_mol = batch.to(device)
 
-        if args.advs:
-            perturbed_batch = robust_augment(model, batch_mol, threshold, device, args)
 
         model.train()
         if args.feature == "full":
@@ -216,16 +69,8 @@ def train(
         else:
             optimizer.zero_grad()
             loss = 0
-            if args.advs:
-                perturbed_pred = model(perturbed_batch)
-                #breakpoint()
-                class_loss = cls_criterion(
-                    F.sigmoid(perturbed_pred[:, 1]).to(torch.float32),
-                    #F.sigmoid(perturbed_pred).to(torch.float32),
-                    perturbed_batch.y.to(torch.float32),
-                )
 
-            elif args.use_prot:
+            if args.use_prot:
                 pred = model(batch_mol, batch_prot)
                 class_loss = cls_criterion(
                     F.sigmoid(pred[:, 1]).to(torch.float32),
@@ -235,26 +80,19 @@ def train(
             else:
                 pred = model(batch_mol)
                 if not args.binary:
-                    for i in range(num_classes):
+                    for i in range(0,num_classes):
                         class_mask = batch.y.clone()
                         class_mask[batch.y == i] = 1
                         class_mask[batch.y != i] = 0
-                        #breakpoint()
-                        class_loss = cls_criterion(F.sigmoid(pred[:,i]).to(torch.float32),
-                                                   class_mask.to(torch.float32))
+                        class_loss = cls_criterion(F.sigmoid(pred[:,i]).to(torch.float32), class_mask.to(torch.float32))
                         loss += class_loss
-
-                '''class_loss = cls_criterion(
-                    #F.sigmoid(pred[:, 1]).to(torch.float32),
-                    F.sigmoid(pred).to(torch.float32),
-                    batch_mol.y.to(torch.float32),
-                )'''
-
-            loss += class_loss
-
-            loss.backward()
-            optimizer.step()
-            loss_list.append(loss.item())
+                else:
+                    class_loss = cls_criterion(F.sigmoid(pred[:,1]).to(torch.float32), batch.y.to(torch.float32))
+                    loss += class_loss
+                
+                loss.backward()
+                optimizer.step()
+                loss_list.append(loss.item())
         
 
     return np.mean(loss_list)
@@ -295,21 +133,26 @@ def eval_gcn(model, device, loader, num_classes, args):
                     pred = model(batch_mol, batch_prot)
                 else:
                     pred = model(batch_mol)
-
                 loss = 0
-
-                class_loss = cls_criterion(
-                    F.sigmoid(pred[:, 1]).to(torch.float32),
-                    #F.sigmoid(pred).to(torch.float32),
-                    batch_mol.y.to(torch.float32),
-                )
-                loss += class_loss
+                if not args.binary:
+                    for i in range(0,num_classes):
+                        class_mask = batch.y.clone()
+                        class_mask[batch.y == i] = 1
+                        class_mask[batch.y != i] = 0
+                        class_loss = cls_criterion(F.sigmoid(pred[:,i]).to(torch.float32), class_mask.to(torch.float32))
+                        loss += class_loss
+                else:
+                    class_loss = cls_criterion(F.sigmoid(pred[:,1]).to(torch.float32), batch.y.to(torch.float32))
+                    loss += class_loss
+                
                 loss_list.append(loss.item())
-                pred = F.softmax(pred, dim=1)
-                y_true.append(batch_mol.y.view(batch_mol.y.shape).detach().cpu())
+                pred = F.softmax(pred,dim=1)
+                y_true.append(batch.y.view(batch.y.shape).detach().cpu())
                 y_pred.append(pred.detach().cpu())
-                _, prediction_class = torch.max(pred, 1)
-                correct += torch.sum(prediction_class == batch_mol.y)
+                _, prediction_class = torch.max(pred,1)
+                correct+=torch.sum(prediction_class == batch.y)
+    
+    
     #breakpoint() #borrar
     y_true = torch.cat(y_true, dim=0).numpy()
     y_pred = torch.cat(y_pred, dim=0).numpy()
@@ -665,7 +508,7 @@ def main():
             tr_loss = train(
                 model, device, train_loader, optimizer, args.nclasses, args, threshold
             )
-#hasta acá voy de la revisión del main - primero revisar eval_gcn()
+
         logging.info("Evaluating...")
         tr_acc, tr_auc, tr_f, tr_nap, tr_loss = eval_gcn(
             model, device, train_loader, args.nclasses, args
@@ -713,9 +556,9 @@ def main():
             name_post="Last_model",
         )
 
-        if tr_nap[epoch] > results["highest_train"]:
+        if tr_nap > results["highest_train"]:
 
-            results["highest_train"] = tr_nap[epoch]
+            results["highest_train"] = tr_nap
 
         if val_loss < results["lowest_valid_loss"]:
             results["lowest_valid_loss"] = val_loss

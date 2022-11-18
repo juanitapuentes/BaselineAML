@@ -273,7 +273,7 @@ def pltmap(output, target, num_classes):
     denom[denom == 0.0] = 1
     fmeasure["micro"] = np.max(2 * precision["micro"] * recall["micro"] / denom)
 
-    return average_precision, fmeasure
+    return average_precision['micro'], fmeasure['micro']
 
 
 def pltauc(output, target, num_classes):
@@ -314,11 +314,11 @@ def plot_nap(train_nap, val_nap, save_dir,
               num_epoch, save=True, show=False):
     fig, ax = plt.subplots()
     ax.set_xlim(0,num_epoch)
-    ax.set_ylim(min(min(train_nap[0].values()),min(val_nap[0].values())),max(max(train_nap[0].values()),max(val_nap[0].values()))*1.1)
+    ax.set_ylim(min(np.min(train_nap),np.min(val_nap)),max(np.max(train_nap),np.max(val_nap))*1.1)
     plt.xlabel('Epoch {0}'.format(num_epoch))
     plt.ylabel('NAP values')
-    plt.plot(train_nap[0].keys(),train_nap[0].values(), label='Train')
-    plt.plot(val_nap[0].keys(),val_nap[0].values(), label='Validation')
+    plt.plot(train_nap, label='Train')
+    plt.plot(val_nap, label='Validation')
     plt.legend()
     
     # Save figure
